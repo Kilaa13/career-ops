@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as yaml from 'js-yaml';
 import { fileURLToPath } from 'node:url';
+import { acquirePipelineLock } from '../pipeline-lock.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CLI = join(ROOT, 'career-profile.mjs');
@@ -118,8 +119,36 @@ test('repeated facts are deduplicated and same-title entries with different fact
     assert.equal(second.status, 0, second.stderr);
     const after = yaml.load(readFileSync(join(root, 'data', 'career-profile.yml'), 'utf8'));
     assert.equal(after.experiences.length, 2);
-    assert.deepEqual(after.experiences.map((entry) => entry.facts[0].text), ['Built reports.', 'Built dashboards.']);
+    assert.deepEqual(after.experiences.map((entry) => entry.facts[0].text).sort(), ['Built dashboards.', 'Built reports.']);
     assert.equal(after.skills.length, 1);
+  });
+});
+
+test('reordering same-title entries keeps each identity attached to its facts on re-import', () => {
+  withProfileRoot((root) => {
+    const firstOrder = `# Candidate\n## Experience\n### Acme — Analyst\n- Built reports.\n### Acme — Analyst\n- Built dashboards.\n`;
+    writeFileSync(join(root, 'cv.md'), firstOrder);
+    const first = runCli(root, ['import', 'cv.md', '--review'], 'y\ny\ny\ny\n');
+    assert.equal(first.status, 0, first.stderr);
+    const profilePath = join(root, 'data', 'career-profile.yml');
+    const initial = yaml.load(readFileSync(profilePath, 'utf8'));
+    const idsByFact = new Map(initial.experiences.map((entry) => [entry.facts[0].text, entry.id]));
+    initial.experiences.forEach((entry, index) => {
+      entry.id = `legacy-experience-${index}`;
+      entry.facts.forEach((fact, factIndex) => { fact.id = `legacy-fact-${index}-${factIndex}`; });
+    });
+    writeFileSync(profilePath, yaml.dump(initial, { noRefs: true }));
+
+    writeFileSync(join(root, 'cv.md'), `# Candidate\n## Experience\n### Acme — Analyst\n- Built dashboards.\n### Acme — Analyst\n- Built reports.\n`);
+    const second = runCli(root, ['import', 'cv.md', '--review'], 'y\ny\ny\ny\n');
+    assert.equal(second.status, 0, second.stderr);
+    const reordered = yaml.load(readFileSync(join(root, 'data', 'career-profile.yml'), 'utf8'));
+    assert.equal(reordered.experiences.length, 2);
+    assert.deepEqual(reordered.experiences.map((entry) => entry.facts.map((fact) => fact.text)).sort(), [
+      ['Built dashboards.'],
+      ['Built reports.'],
+    ]);
+    for (const entry of reordered.experiences) assert.equal(entry.id, idsByFact.get(entry.facts[0].text));
   });
 });
 
@@ -150,4 +179,48 @@ test('re-import applies explicit wording edits but plain approval preserves prio
     assert.equal(profile.experiences[0].label, 'Acme — Lead Analyst');
     assert.equal(profile.experiences[0].facts[0].text, 'Designed verified dashboards.');
   });
+});
+
+test('profile save waits for a held profile lock before merging and writing', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'career-profile-lock-test-'));
+  mkdirSync(join(root, 'data'), { recursive: true });
+  writeFileSync(join(root, 'cv.md'), `# Candidate\n## Skills\n- SQL\n`);
+  const profilePath = join(root, 'data', 'career-profile.yml');
+  const lock = await acquirePipelineLock(profilePath, { timeoutMs: 3000, retryMs: 20 });
+  let child;
+  try {
+    child = spawn(process.execPath, [CLI, 'import', 'cv.md', '--review'], {
+      cwd: ROOT,
+      env: { ...process.env, CAREER_OPS_ROOT: root },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let exitCode = null;
+    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+    const exited = new Promise((resolveExit) => child.once('exit', (code) => {
+      exitCode = code;
+      resolveExit(code);
+    }));
+    child.stdin.end('y\ny\n');
+    const deadline = Date.now() + 5000;
+    while ((stdout.match(/\[y\] approve/g) ?? []).length < 1 && Date.now() < deadline && exitCode === null) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+    }
+    assert.equal((stdout.match(/\[y\] approve/g) ?? []).length, 1, `import did not finish review prompt: ${stdout}`);
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    assert.equal(exitCode, null, 'import must wait for the profile lock');
+
+    lock.release();
+    const status = await exited;
+    assert.equal(status, 0, stderr);
+    assert.equal(existsSync(`${profilePath}.lock`), false, 'profile lock is released after the save');
+    const profile = yaml.load(readFileSync(profilePath, 'utf8'));
+    assert.equal(profile.skills[0].text, 'SQL');
+  } finally {
+    lock.release();
+    if (child && child.exitCode === null) child.kill();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

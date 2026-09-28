@@ -11,6 +11,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { createInterface } from 'readline';
 import * as yaml from 'js-yaml';
 import { getCareerOpsRoot } from './path-resolver.mjs';
+import { withPipelineLock } from './pipeline-lock.mjs';
 
 const root = getCareerOpsRoot();
 const profilePath = join(root, 'data', 'career-profile.yml');
@@ -34,6 +35,15 @@ function stableId(kind, value, source, parent = '') {
   if (process.platform === 'win32') normalizedSource = normalizedSource.toLocaleLowerCase('en-US');
   const identity = [kind, normalizedSource, normalizeKey(parent), normalizeKey(value)].join('\0');
   return `${kind}-${createHash('sha256').update(identity).digest('hex').slice(0, 12)}`;
+}
+
+function evidenceKey(item) {
+  return `${item?.evidence?.source ?? ''}\0${normalizeKey(item?.evidence?.quote ?? '')}`;
+}
+
+function entityEvidenceKey(entry) {
+  const facts = (entry.facts ?? []).map(evidenceKey).sort();
+  return `${evidenceKey(entry)}\0${facts.join('\0')}`;
 }
 
 function classifyHeading(heading) {
@@ -102,8 +112,7 @@ function parseCv(text, source) {
     result[key] = [...unique.values()];
   }
   for (const key of ['experiences', 'projects', 'education']) {
-    const firstByLabel = new Map();
-    const uniqueEntries = new Map();
+    const groups = new Map();
     for (const entry of result[key]) {
       const labelKey = normalizeKey(entry.label);
       const factKeys = new Set();
@@ -113,19 +122,27 @@ function parseCv(text, source) {
         factKeys.add(factKey);
         return true;
       });
-      const signature = `${labelKey}\0${[...factKeys].join('\0')}`;
-      const baseId = stableId(key, entry.label, source);
-      const firstSignature = firstByLabel.get(labelKey);
-      if (firstSignature === undefined) firstByLabel.set(labelKey, signature);
-      else if (firstSignature === signature) continue;
-      else {
-        entry.id = stableId(key, `entry:${signature}`, source);
-        for (const fact of entry.facts) fact.id = stableId(key, fact.text, source, entry.id);
-      }
-      if (entry.id === baseId && uniqueEntries.has(entry.id)) continue;
-      uniqueEntries.set(entry.id, entry);
+      const signature = `${labelKey}\0${[...factKeys].sort().join('\0')}`;
+      if (!groups.has(labelKey)) groups.set(labelKey, new Map());
+      const entriesBySignature = groups.get(labelKey);
+      if (entriesBySignature.has(signature)) continue;
+      entriesBySignature.set(signature, entry);
     }
-    result[key] = [...uniqueEntries.values()];
+    const uniqueEntries = [];
+    for (const [labelKey, entriesBySignature] of groups) {
+      const signatures = [...entriesBySignature.keys()].sort();
+      const baseSignature = signatures[0];
+      for (const signature of signatures) {
+        const entry = entriesBySignature.get(signature);
+        const baseId = stableId(key, entry.label, source);
+        if (signature !== baseSignature) {
+          entry.id = stableId(key, `entry:${signature}`, source);
+          for (const fact of entry.facts) fact.id = stableId(key, fact.text, source, entry.id);
+        } else entry.id = baseId;
+        uniqueEntries.push(entry);
+      }
+    }
+    result[key] = uniqueEntries;
   }
   return result;
 }
@@ -250,41 +267,63 @@ async function doImport(args) {
     input.close();
   }
 
-  const existing = readProfile(profilePath);
-  const merged = { ...existing, schema_version: 1, candidate: { ...existing.candidate, ...approved.candidate } };
-  for (const key of ['summary', 'experiences', 'projects', 'education', 'certifications', 'skills']) {
-    const byId = new Map((existing[key] ?? []).map((item) => [item.id, item]));
-    for (const item of approved[key]) {
-      if (!byId.has(item.id)) byId.set(item.id, item);
-      else if ('facts' in item) {
-        const old = byId.get(item.id);
-        const facts = new Map((old.facts ?? []).map((fact) => [fact.id, fact]));
-        for (const fact of item.facts ?? []) {
-          const existingFact = facts.get(fact.id);
-          facts.set(fact.id, existingFact
-            ? { ...existingFact, ...(editedIds.has(fact.id) ? { text: fact.text } : {}), evidence: fact.evidence, review_status: fact.review_status }
-            : fact);
-        }
-        byId.set(item.id, { ...old, ...(editedIds.has(item.id) ? { label: item.label } : {}), evidence: item.evidence, review_status: item.review_status, facts: [...facts.values()] });
+  await withPipelineLock(profilePath, () => {
+    const existing = readProfile(profilePath);
+    const merged = { ...existing, schema_version: 1, candidate: { ...existing.candidate, ...approved.candidate } };
+    for (const key of ['summary', 'experiences', 'projects', 'education', 'certifications', 'skills']) {
+      const existingItems = existing[key] ?? [];
+      const reidentified = new Map();
+      const migratedIds = new Set();
+      for (const item of approved[key]) {
+        if (!('facts' in item)) continue;
+        const identity = entityEvidenceKey(item);
+        const prior = existingItems.find((candidate) => !migratedIds.has(candidate.id) && 'facts' in candidate && entityEvidenceKey(candidate) === identity);
+        if (!prior) continue;
+        reidentified.set(item.id, prior);
+        migratedIds.add(prior.id);
       }
-      else byId.set(item.id, {
-        ...byId.get(item.id),
-        ...(editedIds.has(item.id) ? { text: item.text } : {}),
-        evidence: item.evidence,
-        review_status: item.review_status,
-      });
+      const byId = new Map(existingItems.filter((item) => !migratedIds.has(item.id)).map((item) => [item.id, item]));
+      for (const [id, prior] of reidentified) {
+        const incoming = approved[key].find((item) => item.id === id);
+        const incomingFactsByEvidence = new Map((incoming?.facts ?? []).map((fact) => [evidenceKey(fact), fact]));
+        const facts = (prior.facts ?? []).map((fact) => {
+          const fresh = incomingFactsByEvidence.get(evidenceKey(fact));
+          return fresh ? { ...fact, id: fresh.id } : fact;
+        });
+        byId.set(id, { ...prior, id, facts });
+      }
+      for (const item of approved[key]) {
+        if (!byId.has(item.id)) byId.set(item.id, item);
+        else if ('facts' in item) {
+          const old = byId.get(item.id);
+          const facts = new Map((old.facts ?? []).map((fact) => [fact.id, fact]));
+          for (const fact of item.facts ?? []) {
+            const existingFact = facts.get(fact.id);
+            facts.set(fact.id, existingFact
+              ? { ...existingFact, ...(editedIds.has(fact.id) ? { text: fact.text } : {}), evidence: fact.evidence, review_status: fact.review_status }
+              : fact);
+          }
+          byId.set(item.id, { ...old, ...(editedIds.has(item.id) ? { label: item.label } : {}), evidence: item.evidence, review_status: item.review_status, facts: [...facts.values()] });
+        }
+        else byId.set(item.id, {
+          ...byId.get(item.id),
+          ...(editedIds.has(item.id) ? { text: item.text } : {}),
+          evidence: item.evidence,
+          review_status: item.review_status,
+        });
+      }
+      merged[key] = [...byId.values()];
     }
-    merged[key] = [...byId.values()];
-  }
-  const errors = validateProfile(merged);
-  if (errors.length) throw new Error(`Import rejected:\n- ${errors.join('\n- ')}`);
-  const count = Object.values(approved).filter(Array.isArray).reduce((n, items) => n + items.length, 0);
-  if (!count) { process.stdout.write('No approved items; profile was not changed.\n'); return; }
-  mkdirSync(dirname(profilePath), { recursive: true });
-  const tmpPath = `${profilePath}.tmp`;
-  writeFileSync(tmpPath, yaml.dump(merged, { noRefs: true, lineWidth: 100 }), { encoding: 'utf8', flag: 'w' });
-  renameSync(tmpPath, profilePath);
-  process.stdout.write(`Saved ${profilePath}. Approved items are marked verified; existing entries were preserved.\n`);
+    const errors = validateProfile(merged);
+    if (errors.length) throw new Error(`Import rejected:\n- ${errors.join('\n- ')}`);
+    const count = Object.values(approved).filter(Array.isArray).reduce((n, items) => n + items.length, 0);
+    if (!count) { process.stdout.write('No approved items; profile was not changed.\n'); return; }
+    mkdirSync(dirname(profilePath), { recursive: true });
+    const tmpPath = `${profilePath}.tmp`;
+    writeFileSync(tmpPath, yaml.dump(merged, { noRefs: true, lineWidth: 100 }), { encoding: 'utf8', flag: 'w' });
+    renameSync(tmpPath, profilePath);
+    process.stdout.write(`Saved ${profilePath}. Approved items are marked verified; existing entries were preserved.\n`);
+  });
 }
 
 function doValidate(args) {
