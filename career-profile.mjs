@@ -96,6 +96,37 @@ function parseCv(text, source) {
       }
     }
   });
+  for (const key of ['summary', 'certifications', 'skills']) {
+    const unique = new Map();
+    for (const fact of result[key]) if (!unique.has(fact.id)) unique.set(fact.id, fact);
+    result[key] = [...unique.values()];
+  }
+  for (const key of ['experiences', 'projects', 'education']) {
+    const firstByLabel = new Map();
+    const uniqueEntries = new Map();
+    for (const entry of result[key]) {
+      const labelKey = normalizeKey(entry.label);
+      const factKeys = new Set();
+      entry.facts = entry.facts.filter((fact) => {
+        const factKey = normalizeKey(fact.text);
+        if (factKeys.has(factKey)) return false;
+        factKeys.add(factKey);
+        return true;
+      });
+      const signature = `${labelKey}\0${[...factKeys].join('\0')}`;
+      const baseId = stableId(key, entry.label, source);
+      const firstSignature = firstByLabel.get(labelKey);
+      if (firstSignature === undefined) firstByLabel.set(labelKey, signature);
+      else if (firstSignature === signature) continue;
+      else {
+        entry.id = stableId(key, `entry:${signature}`, source);
+        for (const fact of entry.facts) fact.id = stableId(key, fact.text, source, entry.id);
+      }
+      if (entry.id === baseId && uniqueEntries.has(entry.id)) continue;
+      uniqueEntries.set(entry.id, entry);
+    }
+    result[key] = [...uniqueEntries.values()];
+  }
   return result;
 }
 
@@ -150,15 +181,15 @@ async function reviewFact(fact, label, lines) {
   process.stdout.write(`\n${label}: ${fact.text}\n  Evidence: ${fact.evidence.source}:${fact.evidence.line} — ${fact.evidence.quote}\n`);
   while (true) {
     const response = await ask(lines, '  [y] approve / [e] edit / [n] skip / [q] finish: ');
-    if (response === null) return 'quit';
+    if (response === null) return { quit: true };
     const answer = response.toLowerCase();
-    if (answer === 'y') { fact.review_status = 'verified'; return fact; }
-    if (answer === 'n') return null;
-    if (answer === 'q') return 'quit';
+    if (answer === 'y') { fact.review_status = 'verified'; return { fact, edited: false }; }
+    if (answer === 'n') return { fact: null, edited: false };
+    if (answer === 'q') return { quit: true };
     if (answer === 'e') {
       const edited = await ask(lines, '  Revised wording (blank cancels): ');
-      if (edited === null) return 'quit';
-      if (edited) { fact.text = edited; fact.review_status = 'verified'; return fact; }
+      if (edited === null) return { quit: true };
+      if (edited) { fact.text = edited; fact.review_status = 'verified'; return { fact, edited: true }; }
     }
   }
 }
@@ -189,21 +220,29 @@ async function doImport(args) {
   }
 
   const approved = { ...extracted, candidate: { ...extracted.candidate }, summary: [], experiences: [], projects: [], education: [], certifications: [], skills: [] };
+  const skippedEntities = new Set();
+  const editedIds = new Set();
   let quit = false;
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const lines = input[Symbol.asyncIterator]();
   try {
     for (const entry of candidates) {
       if (quit) break;
+      if (entry.fact && entry.item && skippedEntities.has(entry.item.id)) continue;
       const target = entry.fact ?? { id: entry.item.id, text: entry.item.label, evidence: entry.item.evidence, review_status: 'needs_review' };
-      const result = await reviewFact(target, entry.label, lines);
-      if (result === 'quit') { quit = true; break; }
-      if (!result) continue;
+      const decision = await reviewFact(target, entry.label, lines);
+      if (decision.quit) { quit = true; break; }
+      if (!decision.fact) {
+        if (!entry.fact) skippedEntities.add(entry.item.id);
+        continue;
+      }
+      const result = decision.fact;
+      if (decision.edited) editedIds.add(result.id);
       if (entry.fact) {
         if (entry.item && 'facts' in entry.item) {
           const kept = approved[entry.key].find((x) => x.id === entry.item.id);
           if (kept) kept.facts.push(result);
-          else approved[entry.key].push({ ...entry.item, review_status: 'needs_review', facts: [result] });
+          else approved[entry.key].push({ ...entry.item, review_status: 'verified', facts: [result] });
         } else approved[entry.key].push(result);
       } else approved[entry.key].push({ ...entry.item, label: result.text, review_status: 'verified', facts: [] });
     }
@@ -222,11 +261,18 @@ async function doImport(args) {
         const facts = new Map((old.facts ?? []).map((fact) => [fact.id, fact]));
         for (const fact of item.facts ?? []) {
           const existingFact = facts.get(fact.id);
-          facts.set(fact.id, existingFact ? { ...existingFact, evidence: fact.evidence } : fact);
+          facts.set(fact.id, existingFact
+            ? { ...existingFact, ...(editedIds.has(fact.id) ? { text: fact.text } : {}), evidence: fact.evidence, review_status: fact.review_status }
+            : fact);
         }
-        byId.set(item.id, { ...old, evidence: item.evidence, facts: [...facts.values()] });
+        byId.set(item.id, { ...old, ...(editedIds.has(item.id) ? { label: item.label } : {}), evidence: item.evidence, review_status: item.review_status, facts: [...facts.values()] });
       }
-      else byId.set(item.id, { ...byId.get(item.id), evidence: item.evidence });
+      else byId.set(item.id, {
+        ...byId.get(item.id),
+        ...(editedIds.has(item.id) ? { text: item.text } : {}),
+        evidence: item.evidence,
+        review_status: item.review_status,
+      });
     }
     merged[key] = [...byId.values()];
   }

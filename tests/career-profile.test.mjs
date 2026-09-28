@@ -100,3 +100,54 @@ test('identical statements under different experience entries retain distinct ID
     assert.notEqual(ids[0], ids[1]);
   });
 });
+
+test('repeated facts are deduplicated and same-title entries with different facts stay distinct', () => {
+  withProfileRoot((root) => {
+    const cv = `# Candidate\n## Experience\n### Acme — Analyst\n- Built reports.\n- Built reports.\n### Acme — Analyst\n- Built dashboards.\n## Skills\n- SQL, SQL\n`;
+    writeFileSync(join(root, 'cv.md'), cv);
+    const first = runCli(root, ['import', 'cv.md', '--review'], 'y\ny\ny\ny\ny\n');
+    assert.equal(first.status, 0, first.stderr);
+    const before = yaml.load(readFileSync(join(root, 'data', 'career-profile.yml'), 'utf8'));
+    assert.equal(before.experiences.length, 2);
+    assert.notEqual(before.experiences[0].id, before.experiences[1].id);
+    assert.equal(before.experiences[0].facts.length, 1);
+    assert.equal(before.skills.length, 1);
+
+    writeFileSync(join(root, 'cv.md'), `<!-- moved -->\n${cv}`);
+    const second = runCli(root, ['import', 'cv.md', '--review'], 'y\ny\ny\ny\ny\n');
+    assert.equal(second.status, 0, second.stderr);
+    const after = yaml.load(readFileSync(join(root, 'data', 'career-profile.yml'), 'utf8'));
+    assert.equal(after.experiences.length, 2);
+    assert.deepEqual(after.experiences.map((entry) => entry.facts[0].text), ['Built reports.', 'Built dashboards.']);
+    assert.equal(after.skills.length, 1);
+  });
+});
+
+test('skipping an experience heading also skips its facts', () => {
+  withProfileRoot((root) => {
+    const result = runCli(root, ['import', 'cv.md', '--review'], 'n\ny\ny\n');
+    assert.equal(result.status, 0, result.stderr);
+    const profile = yaml.load(readFileSync(join(root, 'data', 'career-profile.yml'), 'utf8'));
+    assert.equal(profile.experiences.length, 0);
+    assert.equal(profile.skills.length, 2);
+  });
+});
+
+test('re-import applies explicit wording edits but plain approval preserves prior edits', () => {
+  withProfileRoot((root) => {
+    const initial = runCli(root, ['import', 'cv.md', '--review'], 'y\ny\nn\nn\n');
+    assert.equal(initial.status, 0, initial.stderr);
+
+    const edited = runCli(root, ['import', 'cv.md', '--review'], 'e\nAcme — Lead Analyst\ne\nDesigned verified dashboards.\nn\nn\n');
+    assert.equal(edited.status, 0, edited.stderr);
+    let profile = yaml.load(readFileSync(join(root, 'data', 'career-profile.yml'), 'utf8'));
+    assert.equal(profile.experiences[0].label, 'Acme — Lead Analyst');
+    assert.equal(profile.experiences[0].facts[0].text, 'Designed verified dashboards.');
+
+    const approvedAgain = runCli(root, ['import', 'cv.md', '--review'], 'y\ny\nn\nn\n');
+    assert.equal(approvedAgain.status, 0, approvedAgain.stderr);
+    profile = yaml.load(readFileSync(join(root, 'data', 'career-profile.yml'), 'utf8'));
+    assert.equal(profile.experiences[0].label, 'Acme — Lead Analyst');
+    assert.equal(profile.experiences[0].facts[0].text, 'Designed verified dashboards.');
+  });
+});
