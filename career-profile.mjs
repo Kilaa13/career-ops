@@ -7,7 +7,8 @@
 
 import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
-import { dirname, join, resolve } from 'path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'path';
+import { createInterface } from 'readline';
 import * as yaml from 'js-yaml';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 
@@ -24,8 +25,15 @@ const HELP = `Master Career Profile
     Check the profile structure and source evidence.
 `;
 
-function stableId(kind, value, source) {
-  return `${kind}-${createHash('sha256').update(`${source}\0${value}`).digest('hex').slice(0, 12)}`;
+function normalizeKey(value) {
+  return String(value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+}
+
+function stableId(kind, value, source, parent = '') {
+  let normalizedSource = source.replaceAll('\\', '/').replace(/\/+/g, '/');
+  if (process.platform === 'win32') normalizedSource = normalizedSource.toLocaleLowerCase('en-US');
+  const identity = [kind, normalizedSource, normalizeKey(parent), normalizeKey(value)].join('\0');
+  return `${kind}-${createHash('sha256').update(identity).digest('hex').slice(0, 12)}`;
 }
 
 function classifyHeading(heading) {
@@ -45,7 +53,7 @@ function parseCv(text, source) {
   let section = null;
   let entity = null;
   const addFact = (collection, value, line) => {
-    const fact = { id: stableId(collection, value, `${source}:${line}`), text: value,
+    const fact = { id: stableId(collection, value, source, entity?.label ?? ''), text: value,
       evidence: { source, line, quote: lines[line - 1].trim() }, review_status: 'needs_review' };
     if (collection === 'summary' || collection === 'certifications' || collection === 'skills') result[collection].push(fact);
     else if (entity) entity.facts.push(fact);
@@ -66,7 +74,7 @@ function parseCv(text, source) {
       const found = classifyHeading(title);
       if (found) { section = found; entity = null; return; }
       if (section && ['experiences', 'projects', 'education'].includes(section)) {
-        entity = { id: stableId(section, title, `${source}:${lineNo}`), label: title,
+        entity = { id: stableId(section, title, source), label: title,
           evidence: { source, line: lineNo, quote: raw.trim() }, facts: [] };
         result[section].push(entity);
       }
@@ -82,7 +90,7 @@ function parseCv(text, source) {
     else if (['experiences', 'projects', 'education'].includes(section)) {
       if (/^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(raw) && entity) addFact(section, value, lineNo);
       else {
-        entity = { id: stableId(section, value, `${source}:${lineNo}`), label: value,
+        entity = { id: stableId(section, value, source), label: value,
           evidence: { source, line: lineNo, quote: raw.trim() }, facts: [] };
         result[section].push(entity);
       }
@@ -132,23 +140,24 @@ function readProfile(file) {
   return parsed;
 }
 
-function ask(question) {
-  return new Promise((resolveAnswer) => {
-    process.stdout.write(question);
-    process.stdin.resume();
-    process.stdin.once('data', (data) => resolveAnswer(String(data).trim()));
-  });
+async function ask(lines, question) {
+  process.stdout.write(question);
+  const answer = await lines.next();
+  return answer.done ? null : answer.value.trim();
 }
 
-async function reviewFact(fact, label) {
+async function reviewFact(fact, label, lines) {
   process.stdout.write(`\n${label}: ${fact.text}\n  Evidence: ${fact.evidence.source}:${fact.evidence.line} — ${fact.evidence.quote}\n`);
   while (true) {
-    const answer = (await ask('  [y] approve / [e] edit / [n] skip / [q] finish: ')).toLowerCase();
+    const response = await ask(lines, '  [y] approve / [e] edit / [n] skip / [q] finish: ');
+    if (response === null) return 'quit';
+    const answer = response.toLowerCase();
     if (answer === 'y') { fact.review_status = 'verified'; return fact; }
     if (answer === 'n') return null;
     if (answer === 'q') return 'quit';
     if (answer === 'e') {
-      const edited = await ask('  Revised wording (blank cancels): ');
+      const edited = await ask(lines, '  Revised wording (blank cancels): ');
+      if (edited === null) return 'quit';
       if (edited) { fact.text = edited; fact.review_status = 'verified'; return fact; }
     }
   }
@@ -159,7 +168,9 @@ async function doImport(args) {
   const sourceArg = args.find((arg) => !arg.startsWith('--')) || 'cv.md';
   const sourcePath = resolve(root, sourceArg);
   if (!existsSync(sourcePath)) throw new Error(`CV file not found: ${sourcePath}`);
-  const source = sourcePath.startsWith(root) ? sourcePath.slice(root.length + 1).replaceAll('\\', '/') : sourcePath;
+  const relativeSource = relative(root, sourcePath);
+  const outsideRoot = relativeSource === '..' || relativeSource.startsWith(`..${sep}`) || isAbsolute(relativeSource);
+  const source = outsideRoot ? sourcePath : relativeSource.split(sep).join('/');
   const extracted = parseCv(readFileSync(sourcePath, 'utf8'), source);
   const candidates = [];
   for (const key of ['summary', 'experiences', 'projects', 'education', 'certifications', 'skills']) {
@@ -179,19 +190,25 @@ async function doImport(args) {
 
   const approved = { ...extracted, candidate: { ...extracted.candidate }, summary: [], experiences: [], projects: [], education: [], certifications: [], skills: [] };
   let quit = false;
-  for (const entry of candidates) {
-    if (quit) break;
-    const target = entry.fact ?? { id: entry.item.id, text: entry.item.label, evidence: entry.item.evidence, review_status: 'needs_review' };
-    const result = await reviewFact(target, entry.label);
-    if (result === 'quit') { quit = true; break; }
-    if (!result) continue;
-    if (entry.fact) {
-      if ('facts' in entry.item) {
-        const kept = approved[entry.key].find((x) => x.id === entry.item.id);
-        if (kept) kept.facts.push(result);
-        else approved[entry.key].push({ ...entry.item, review_status: 'needs_review', facts: [result] });
-      } else approved[entry.key].push(result);
-    } else approved[entry.key].push({ ...entry.item, label: result.text, review_status: 'verified', facts: [] });
+  const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+  const lines = input[Symbol.asyncIterator]();
+  try {
+    for (const entry of candidates) {
+      if (quit) break;
+      const target = entry.fact ?? { id: entry.item.id, text: entry.item.label, evidence: entry.item.evidence, review_status: 'needs_review' };
+      const result = await reviewFact(target, entry.label, lines);
+      if (result === 'quit') { quit = true; break; }
+      if (!result) continue;
+      if (entry.fact) {
+        if (entry.item && 'facts' in entry.item) {
+          const kept = approved[entry.key].find((x) => x.id === entry.item.id);
+          if (kept) kept.facts.push(result);
+          else approved[entry.key].push({ ...entry.item, review_status: 'needs_review', facts: [result] });
+        } else approved[entry.key].push(result);
+      } else approved[entry.key].push({ ...entry.item, label: result.text, review_status: 'verified', facts: [] });
+    }
+  } finally {
+    input.close();
   }
 
   const existing = readProfile(profilePath);
@@ -203,9 +220,13 @@ async function doImport(args) {
       else if ('facts' in item) {
         const old = byId.get(item.id);
         const facts = new Map((old.facts ?? []).map((fact) => [fact.id, fact]));
-        for (const fact of item.facts ?? []) if (!facts.has(fact.id)) facts.set(fact.id, fact);
-        byId.set(item.id, { ...old, facts: [...facts.values()] });
+        for (const fact of item.facts ?? []) {
+          const existingFact = facts.get(fact.id);
+          facts.set(fact.id, existingFact ? { ...existingFact, evidence: fact.evidence } : fact);
+        }
+        byId.set(item.id, { ...old, evidence: item.evidence, facts: [...facts.values()] });
       }
+      else byId.set(item.id, { ...byId.get(item.id), evidence: item.evidence });
     }
     merged[key] = [...byId.values()];
   }
