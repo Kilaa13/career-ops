@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import * as yaml from 'js-yaml';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { acquirePipelineLock } from '../pipeline-lock.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -178,6 +178,46 @@ test('re-import applies explicit wording edits but plain approval preserves prio
     profile = yaml.load(readFileSync(join(root, 'data', 'career-profile.yml'), 'utf8'));
     assert.equal(profile.experiences[0].label, 'Acme — Lead Analyst');
     assert.equal(profile.experiences[0].facts[0].text, 'Designed verified dashboards.');
+  });
+});
+
+test('an import with nothing approved does not read the existing profile', () => {
+  withProfileRoot((root) => {
+    const profilePath = join(root, 'data', 'career-profile.yml');
+    const invalid = 'schema_version: 2\ncandidate: {}\n';
+    writeFileSync(profilePath, invalid);
+    const result = runCli(root, ['import', 'cv.md', '--review'], 'n\nn\nn\n');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /No approved items; profile was not changed\./);
+    assert.equal(readFileSync(profilePath, 'utf8'), invalid);
+  });
+});
+
+test('a failed save removes its temporary file and reports the original error', () => {
+  withProfileRoot((root) => {
+    // Launcher: make the final rename fail after the temporary file is written, then run the CLI.
+    const launcher = join(root, 'fail-rename.mjs');
+    writeFileSync(launcher, [
+      "import fs from 'node:fs';",
+      "import { syncBuiltinESMExports } from 'node:module';",
+      'const realRename = fs.renameSync;',
+      'fs.renameSync = (from, to) => {',
+      "  if (String(from).endsWith('career-profile.yml.tmp')) throw new Error('simulated rename failure');",
+      '  return realRename(from, to);',
+      '};',
+      'syncBuiltinESMExports();',
+      `await import(${JSON.stringify(pathToFileURL(CLI).href)});`,
+    ].join('\n'));
+    const result = spawnSync(process.execPath, [launcher, 'import', 'cv.md', '--review'], {
+      cwd: ROOT,
+      env: { ...process.env, CAREER_OPS_ROOT: root },
+      encoding: 'utf8', input: 'y\ny\ny\ny\n', timeout: 5000,
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /simulated rename failure/);
+    const profilePath = join(root, 'data', 'career-profile.yml');
+    assert.equal(existsSync(`${profilePath}.tmp`), false, 'temporary file is removed after a failed save');
+    assert.equal(existsSync(profilePath), false);
   });
 });
 
