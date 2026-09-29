@@ -1,5 +1,28 @@
 # Copy is not required: career-profile.mjs creates data/career-profile.yml
 # after explicit review. This is the v1 shape of the generated user-layer file.
+# Evidence needs a source and quote. Existing records with no source_type use
+# legacy file evidence and need a positive line. New evidence may use:
+#
+# evidence:
+#   source_type: file
+#   source: projects/dashboard/README.md
+#   locator: Results
+#   quote: "Presented the dashboard to the sales team"
+#
+# evidence:
+#   source_type: url
+#   source: https://example.com/project
+#   locator: Results
+#   quote: "Project summary describes the dashboard"
+#
+# evidence:
+#   source_type: user_statement
+#   source: user-stated 2026-09-29
+#   quote: "I presented the findings to the sales team"
+#
+# URL validation is local only: links are never fetched, and embedded
+# username/password credentials are rejected. Evidence is not proof of truth;
+# validation does not change review_status.
 schema_version: 1
 candidate: {}
 summary: []
