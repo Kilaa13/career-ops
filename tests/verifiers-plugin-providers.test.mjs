@@ -47,7 +47,7 @@ function prepareFixtureCodeRoot(tmp) {
     if (existsSync(join(ROOT, dir))) cpSync(join(ROOT, dir), join(codeRoot, dir), { recursive: true });
   }
   if (existsSync(join(ROOT, 'node_modules'))) {
-    symlinkSync(join(ROOT, 'node_modules'), join(codeRoot, 'node_modules'), 'dir');
+    symlinkSync(join(ROOT, 'node_modules'), join(codeRoot, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
   }
   return codeRoot;
 }
