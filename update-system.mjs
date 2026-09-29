@@ -257,6 +257,7 @@ const SYSTEM_PATHS = [
   'lib/outcome-types.mjs',
   'lib/latex-escape.mjs',
   'lib/cv-payload-schema.mjs',
+  'lib/career-profile-evidence.mjs',
   'lib/page-format.mjs',
   'scan-hn.mjs',
   'scripts/check-syntax.mjs',

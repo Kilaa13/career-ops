@@ -12,6 +12,7 @@ import { createInterface } from 'readline';
 import * as yaml from 'js-yaml';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
+import { formatEvidence, validateEvidence } from './lib/career-profile-evidence.mjs';
 
 const root = getCareerOpsRoot();
 const profilePath = join(root, 'data', 'career-profile.yml');
@@ -159,9 +160,7 @@ function validateProfile(profile) {
     else ids.add(fact.id);
     if (typeof fact.text !== 'string' || !fact.text.trim()) errors.push(`${path}.text is required`);
     if (!STATUS.has(fact.review_status)) errors.push(`${path}.review_status must be needs_review or verified`);
-    if (!fact.evidence || typeof fact.evidence.source !== 'string' || !fact.evidence.source.trim() ||
-        !Number.isInteger(fact.evidence.line) || fact.evidence.line < 1 ||
-        typeof fact.evidence.quote !== 'string' || !fact.evidence.quote.trim()) errors.push(`${path}.evidence requires source, positive line, and quote`);
+    errors.push(...validateEvidence(fact.evidence, `${path}.evidence`));
   };
   const arrays = ['summary', 'experiences', 'projects', 'education', 'certifications', 'skills'];
   for (const key of arrays) if (!Array.isArray(profile?.[key])) errors.push(`${key} must be a list`);
@@ -195,7 +194,7 @@ async function ask(lines, question) {
 }
 
 async function reviewFact(fact, label, lines) {
-  process.stdout.write(`\n${label}: ${fact.text}\n  Evidence: ${fact.evidence.source}:${fact.evidence.line} — ${fact.evidence.quote}\n`);
+  process.stdout.write(`\n${label}: ${fact.text}\n  Evidence: ${formatEvidence(fact.evidence)}\n`);
   while (true) {
     const response = await ask(lines, '  [y] approve / [e] edit / [n] skip / [q] finish: ');
     if (response === null) return { quit: true };

@@ -73,6 +73,53 @@ test('preview does not create a profile, and validation rejects missing evidence
   });
 });
 
+test('validation accepts typed evidence without rewriting a v1 profile', () => {
+  withProfileRoot((root) => {
+    const profilePath = join(root, 'typed-evidence.yml');
+    const profile = {
+      schema_version: 1,
+      candidate: {},
+      summary: [],
+      experiences: [],
+      projects: [{
+        id: 'project-1',
+        label: 'Sales dashboard',
+        evidence: { source_type: 'file', source: 'projects/dashboard.md', locator: 'Results', quote: 'Sales dashboard' },
+        review_status: 'verified',
+        facts: [{
+          id: 'project-fact-1',
+          text: 'Presented findings to stakeholders',
+          evidence: { source_type: 'user_statement', source: 'user-stated 2026-09-29', quote: 'I presented findings to stakeholders' },
+          review_status: 'needs_review',
+        }],
+      }],
+      education: [],
+      certifications: [],
+      skills: [{
+        id: 'skill-1',
+        text: 'SQL',
+        evidence: { source_type: 'url', source: 'https://example.com/project', locator: 'results', quote: 'Used SQL for analysis' },
+        review_status: 'verified',
+      }],
+    };
+    const original = yaml.dump(profile, { noRefs: true });
+    writeFileSync(profilePath, original);
+
+    const result = runCli(root, ['validate', profilePath]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Valid Master Career Profile/);
+    assert.equal(readFileSync(profilePath, 'utf8'), original, 'validation must not rewrite profile data or review status');
+
+    profile.projects[0].facts[0].evidence = {
+      source_type: 'url', source: 'javascript:alert(1)', quote: 'I presented findings to stakeholders',
+    };
+    writeFileSync(profilePath, yaml.dump(profile, { noRefs: true }));
+    const invalid = runCli(root, ['validate', profilePath]);
+    assert.equal(invalid.status, 1);
+    assert.match(invalid.stderr, /projects\[0\]\.facts\[0\]\.evidence\.source/);
+  });
+});
+
 test('source paths outside the data root retain their complete absolute path', () => {
   withProfileRoot((root) => {
     const sibling = `${root}-archive`;
