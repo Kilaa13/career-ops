@@ -6,7 +6,7 @@
  */
 
 import { createHash } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { createInterface } from 'readline';
 import * as yaml from 'js-yaml';
@@ -267,6 +267,8 @@ async function doImport(args) {
     input.close();
   }
 
+  const count = Object.values(approved).filter(Array.isArray).reduce((n, items) => n + items.length, 0);
+  if (!count) { process.stdout.write('No approved items; profile was not changed.\n'); return; }
   await withPipelineLock(profilePath, () => {
     const existing = readProfile(profilePath);
     const merged = { ...existing, schema_version: 1, candidate: { ...existing.candidate, ...approved.candidate } };
@@ -316,12 +318,15 @@ async function doImport(args) {
     }
     const errors = validateProfile(merged);
     if (errors.length) throw new Error(`Import rejected:\n- ${errors.join('\n- ')}`);
-    const count = Object.values(approved).filter(Array.isArray).reduce((n, items) => n + items.length, 0);
-    if (!count) { process.stdout.write('No approved items; profile was not changed.\n'); return; }
     mkdirSync(dirname(profilePath), { recursive: true });
     const tmpPath = `${profilePath}.tmp`;
-    writeFileSync(tmpPath, yaml.dump(merged, { noRefs: true, lineWidth: 100 }), { encoding: 'utf8', flag: 'w' });
-    renameSync(tmpPath, profilePath);
+    try {
+      writeFileSync(tmpPath, yaml.dump(merged, { noRefs: true, lineWidth: 100 }), { encoding: 'utf8', flag: 'w' });
+      renameSync(tmpPath, profilePath);
+    } catch (error) {
+      try { rmSync(tmpPath, { force: true }); } catch { /* keep the save error, not the cleanup one */ }
+      throw error;
+    }
     process.stdout.write(`Saved ${profilePath}. Approved items are marked verified; existing entries were preserved.\n`);
   });
 }
