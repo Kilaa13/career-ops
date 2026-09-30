@@ -30,6 +30,7 @@ table in `AGENTS.md` (mirrored in `CLAUDE.md`).
 | `deep.md` | `deep` | Deep company-research prompt |
 | `interview.md` | `interview` | Interactive profile & CV onboarding |
 | `master-profile.md` | `master-profile` | Source-backed Master Career Profile import and review |
+| `profile-match.md` | `profile-match` | Map job requirements to Master Profile evidence; report partial and missing evidence without scoring |
 | `interview-prep.md` | `interview-prep` | Company-specific interview intelligence |
 | `interview-redflag.md` | `interview-redflag` | Company red-flag detector |
 | `offer-prep.md` | `offer-prep` | Contract reading companion (offer stage) |
