@@ -154,6 +154,7 @@ const SYSTEM_PATHS = [
   'voice-dna.template.md',
   'modes/oferta.md',
   'modes/master-profile.md',
+  'modes/profile-match.md',
   'modes/pdf.md',
   'modes/ats.md',
   'modes/text.md',
