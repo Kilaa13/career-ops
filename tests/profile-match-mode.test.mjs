@@ -9,11 +9,12 @@ test('profile-match mode is registered and describes its evidence contract', () 
   const agents = read('AGENTS.md');
   const catalog = read('modes/README.md');
   const updater = read('update-system.mjs');
+  const systemPaths = updater.match(/const SYSTEM_PATHS = \[([\s\S]*?)\n\];/)?.[1] ?? '';
 
   assert.match(mode, /^# Mode: profile-match\b/m);
   assert.match(agents, /compare a job description with the Master Career Profile.*`profile-match`/is);
   assert.match(catalog, /`profile-match\.md`\s*\|\s*`profile-match`/);
-  assert.match(updater, /['"]modes\/profile-match\.md['"]/);
+  assert.match(systemPaths, /['"]modes\/profile-match\.md['"]/);
 
   for (const status of [
     'Supported by evidence',
