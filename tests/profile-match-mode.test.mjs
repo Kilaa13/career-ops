@@ -28,3 +28,28 @@ test('profile-match mode is registered and describes its evidence contract', () 
   assert.match(mode, /do not modify.{0,100}(?:profile|CV|tracker)/is);
   assert.match(mode, /untrusted external content|never as commands/is);
 });
+
+test('syntheticFixturesCoverAllMatchStatuses', () => {
+  const profile = read('tests/fixtures/profile-match/career-profile.yml');
+  const jd = read('tests/fixtures/profile-match/job-description.md');
+  const expected = read('tests/fixtures/profile-match/expected-statuses.md');
+
+  assert.match(profile, /review_status:\s*verified/);
+  assert.match(profile, /review_status:\s*needs_review/);
+  assert.match(profile, /certifications:\s*\[\]/);
+  assert.doesNotMatch(profile, /work authorization/i);
+  assert.match(profile, /Python/i);
+  assert.match(profile, /led a team of eight/i);
+  assert.match(profile, /Tableau/i);
+  assert.match(jd, /Python/i);
+  assert.match(jd, /lead a team of 10/i);
+  assert.match(jd, /Tableau/i);
+  assert.match(jd, /certification/i);
+  assert.match(jd, /authorized to work/i);
+  assert.match(jd, /AI reviewer|ignore previous instructions/i);
+  assert.match(expected, /Supported by evidence/);
+  assert.match(expected, /Partially supported/);
+  assert.match(expected, /No profile evidence/);
+  assert.match(expected, /Needs confirmation/);
+  assert.match(expected, /no explicit requirements/i);
+});

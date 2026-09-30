@@ -1,0 +1,53 @@
+schema_version: 1
+candidate:
+  full_name: Ari Example
+summary: []
+experiences:
+  - id: exp-northstar
+    label: Northstar Labs — Data Intern
+    evidence:
+      source: synthetic-cv.md
+      line: 8
+      quote: "# Northstar Labs — Data Intern"
+    review_status: verified
+    facts:
+      - id: fact-mentored-interns
+        text: Mentored two interns during a short project sprint.
+        evidence:
+          source: synthetic-cv.md
+          line: 10
+          quote: "- Mentored two interns during a short project sprint."
+        review_status: verified
+      - id: fact-led-eight-review
+        text: Led a team of eight analysts.
+        evidence:
+          source: interview-notes.md
+          line: 4
+          quote: "I led a team of eight analysts."
+        review_status: needs_review
+projects: []
+education:
+  - id: edu-example-stats
+    label: B.Sc. in Statistics — Example University
+    evidence:
+      source: synthetic-cv.md
+      line: 15
+      quote: "B.Sc. in Statistics, Example University"
+    review_status: verified
+    facts: []
+certifications: []
+skills:
+  - id: skill-python
+    text: Python
+    evidence:
+      source: synthetic-cv.md
+      line: 5
+      quote: "Python"
+    review_status: verified
+  - id: skill-tableau-review
+    text: Tableau
+    evidence:
+      source: project-notes.md
+      line: 12
+      quote: "I used Tableau for the dashboard."
+    review_status: needs_review

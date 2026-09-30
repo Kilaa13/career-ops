@@ -80,7 +80,8 @@ resolve the uncertainty.
 
 Write one Markdown report under `{DATA_ROOT}/reports/`, using the existing
 repository naming conventions and a filename that will not overwrite an
-existing report. Do not create new folders outside the data root.
+existing report. If `reports/` is missing, create that directory inside the
+data root. Do not create new folders outside the data root.
 
 Include:
 
